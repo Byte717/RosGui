@@ -33,6 +33,15 @@ python3 main.py
 ```
 
 The route map is drawn directly by PyQt5, so PyQtWebEngine is not required.
+It loads the visible OpenStreetMap tiles over HTTPS and caches them locally.
+The GPS route continues to render if the tile service is temporarily unreachable.
+For a private or self-hosted tile service, set a compatible URL template before
+starting the GUI:
+
+```bash
+export ROSGUI_TILE_URL="https://maps.example.com/{z}/{x}/{y}.png"
+python3 main.py
+```
 
 The GUI and publisher use the same ROS 2 topics listed in
 `ROS_INTERFACE.md`. You can check that they are connected with:
