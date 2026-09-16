@@ -1,5 +1,4 @@
 import math
-import os
 
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -1026,12 +1025,6 @@ class RosDashboard(QtWidgets.QMainWindow):
 
 
 def main(argc: int, *argv: str) -> int:
-    # QtWebEngine can fail to create its GPU process under WSLg even when the
-    # widget itself is installed.  Keep the fallback limited to WSL and allow
-    # an explicit user value to take precedence.
-    if os.environ.get("WSL_DISTRO_NAME"):
-        os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
-
     app = QtWidgets.QApplication(list(argv))
     app.setFont(QtGui.QFont("Arial"))
     window = RosDashboard()

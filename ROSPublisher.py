@@ -7,6 +7,7 @@ commands.
 """
 
 import math
+import random
 import sys
 
 from Constants import UPDATE_INTERVAL
@@ -56,7 +57,23 @@ class SimulatedRoverPublisher(ROS_NODE_BASE):
         self.enabled = True
         self.container_collected = False
         self.sample_index = 0
-        self.phase = 0.0
+        self.elapsed_seconds = 0.0
+        self.random = random.Random(2026)
+
+        # Motion is a bounded random walk instead of a repeated waveform.
+        self.origin_latitude = 42.3601
+        self.origin_longitude = -71.0589
+        self.north_meters = 0.0
+        self.east_meters = 0.0
+        self.heading = 0.0
+        self.speed_mps = 0.25
+
+        # These values drift slowly and get measurement noise on every update.
+        self.acceleration_drift = [0.0, 0.0, 0.0]
+        self.gyro_drift = [0.0, 0.0, 0.0]
+        self.battery_soc = 0.86
+        self.battery_current = 1.4
+        self.sample_values = [6.8, 45.0, 21.5, 650.0]
 
         self.gps_publisher = self.create_publisher(NavSatFix, GPS_TOPIC, 10)
         self.imu_publisher = self.create_publisher(Imu, IMU_TOPIC, 10)
@@ -105,7 +122,8 @@ class SimulatedRoverPublisher(ROS_NODE_BASE):
         if not self.enabled:
             return
 
-        self.phase += 0.18
+        self.elapsed_seconds += PUBLISH_PERIOD_SECONDS
+        self._update_motion()
         stamp = self.get_clock().now().to_msg()
         self._publish_gps(stamp)
         self._publish_imu(stamp)
@@ -117,30 +135,77 @@ class SimulatedRoverPublisher(ROS_NODE_BASE):
         message.header.frame_id = "gps"
         message.status.status = NavSatStatus.STATUS_FIX
         message.status.service = NavSatStatus.SERVICE_GPS
-        message.latitude = 42.3601 + math.sin(self.phase / 5.0) * 0.00035
-        message.longitude = -71.0589 + math.cos(self.phase / 5.0) * 0.00035
-        message.altitude = 12.0 + math.sin(self.phase) * 0.3
+        message.latitude = self.origin_latitude + (
+            self.north_meters + self.random.gauss(0.0, 1.2)
+        ) / 111111.0
+        message.longitude = self.origin_longitude + (
+            self.east_meters + self.random.gauss(0.0, 1.2)
+        ) / 111111.0
+        message.altitude = 12.0 + self.random.gauss(0.0, 0.15)
         self.gps_publisher.publish(message)
 
     def _publish_imu(self, stamp):
         message = Imu()
         message.header.stamp = stamp
         message.header.frame_id = "imu_link"
-        message.linear_acceleration.x = 0.15 + math.sin(self.phase) * 0.08
-        message.linear_acceleration.y = math.cos(self.phase * 0.8) * 0.06
-        message.linear_acceleration.z = 9.81 + math.sin(self.phase * 0.6) * 0.04
-        message.angular_velocity.x = math.sin(self.phase * 0.7) * 0.12
-        message.angular_velocity.y = math.cos(self.phase * 0.5) * 0.09
-        message.angular_velocity.z = 0.04 + math.sin(self.phase * 0.3) * 0.03
+        for index in range(3):
+            self.acceleration_drift[index] = self._bounded_walk(
+                self.acceleration_drift[index],
+                0.025,
+                -0.35,
+                0.35,
+            )
+            self.gyro_drift[index] = self._bounded_walk(
+                self.gyro_drift[index],
+                0.012,
+                -0.16,
+                0.16,
+            )
+
+        message.linear_acceleration.x = self.acceleration_drift[0] + self.random.gauss(0.0, 0.035)
+        message.linear_acceleration.y = self.acceleration_drift[1] + self.random.gauss(0.0, 0.035)
+        message.linear_acceleration.z = 9.81 + self.acceleration_drift[2] + self.random.gauss(0.0, 0.025)
+        message.angular_velocity.x = self.gyro_drift[0] + self.random.gauss(0.0, 0.012)
+        message.angular_velocity.y = self.gyro_drift[1] + self.random.gauss(0.0, 0.012)
+        message.angular_velocity.z = self.gyro_drift[2] + self.random.gauss(0.0, 0.012)
         self.imu_publisher.publish(message)
 
     def _publish_battery(self, stamp):
         message = BatteryState()
         message.header.stamp = stamp
-        message.voltage = 12.6 - self.phase * 0.003
-        message.current = 1.4 + math.sin(self.phase * 0.9) * 0.25
-        message.percentage = max(0.0, 82.0 - self.phase * 0.04)
+        self.battery_current = self._bounded_walk(
+            self.battery_current,
+            0.08,
+            0.8,
+            2.4,
+        )
+        self.battery_soc = max(
+            0.0,
+            self.battery_soc
+            - self.battery_current * PUBLISH_PERIOD_SECONDS / (10.0 * 3600.0),
+        )
+
+        # Open-circuit voltage follows a curved state-of-charge response. The
+        # current-dependent sag and sensor noise keep it from being linear.
+        open_circuit_voltage = 10.55 + 2.25 * (self.battery_soc ** 0.55)
+        voltage_sag = self.battery_current * 0.11
+        message.voltage = max(
+            10.2,
+            open_circuit_voltage - voltage_sag + self.random.gauss(0.0, 0.025),
+        )
+        message.current = self.battery_current + self.random.gauss(0.0, 0.035)
+        message.percentage = self.battery_soc * 100.0
         self.battery_publisher.publish(message)
+
+    def _update_motion(self):
+        self.speed_mps = self._bounded_walk(self.speed_mps, 0.035, 0.05, 0.6)
+        self.heading += self.random.gauss(0.0, 0.10)
+        distance = self.speed_mps * PUBLISH_PERIOD_SECONDS
+        self.north_meters += math.cos(self.heading) * distance + self.random.gauss(0.0, 0.02)
+        self.east_meters += math.sin(self.heading) * distance + self.random.gauss(0.0, 0.02)
+
+    def _bounded_walk(self, value, step, minimum, maximum):
+        return min(maximum, max(minimum, value + self.random.gauss(0.0, step)))
 
     def _enable_callback(self, message):
         self.enabled = bool(message.data)
@@ -158,12 +223,25 @@ class SimulatedRoverPublisher(ROS_NODE_BASE):
             return
 
         message = Float64MultiArray()
-        reading_phase = self.sample_index * 0.73
+        sample_limits = (
+            (6.3, 7.4, 0.025, 0.015),
+            (20.0, 85.0, 0.8, 0.35),
+            (5.0, 38.0, 0.35, 0.15),
+            (350.0, 1800.0, 25.0, 12.0),
+        )
+        for index, (minimum, maximum, walk_step, noise) in enumerate(sample_limits):
+            self.sample_values[index] = self._bounded_walk(
+                self.sample_values[index],
+                walk_step,
+                minimum,
+                maximum,
+            )
         message.data = [
-            6.8 + math.sin(reading_phase) * 0.18,
-            42.0 + math.sin(reading_phase + 0.5) * 4.0,
-            21.0 + math.sin(reading_phase + 1.1) * 1.8,
-            610.0 + math.sin(reading_phase + 0.2) * 38.0,
+            value + self.random.gauss(0.0, noise)
+            for value, (_minimum, _maximum, _walk_step, noise) in zip(
+                self.sample_values,
+                sample_limits,
+            )
         ]
         self.sample_publisher.publish(message)
         self.sample_index += 1
